@@ -5,8 +5,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies first (layer caching)
-COPY requirements-backend.txt .
-RUN pip install --no-cache-dir -r requirements-backend.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend source files
 COPY agent.py .
@@ -14,10 +14,9 @@ COPY batch_manager.py .
 COPY main.py .
 COPY tools.py .
 
-# Cloud Run sets PORT env var; default to 8080 for local docker testing
+# Cloud Run sets PORT env var; default to 8080
 ENV PORT=8080
 
-# Expose the port
 EXPOSE 8080
 
 # Start the FastAPI server
