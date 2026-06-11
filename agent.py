@@ -195,7 +195,7 @@ class GeminiMCPRunner:
 
         # Validate email
         email = ctx.get("email", "")
-        if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        if not email or not re.match(r"^[\w\.\+\-]+@[\w\-]+\.[\w\.]{2,}$", email):
             missing.append("email")
 
         # Validate department

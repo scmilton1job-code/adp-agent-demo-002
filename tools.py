@@ -70,7 +70,7 @@ def init_and_seed_db():
         candidates = [
             ("101", "Sarah", "Chen", "sarah.chen@example.com", "Engineering", "Senior Cloud Engineer", "2026-07-01", "hired"),
             ("102", "Marcus", "Vance", "marcus.vance@example.com", "Product", "Technical Product Manager", "2026-07-15", "hired"),
-            ("201", "Elena", "Vasquez", "elena.v@example.com", "Operations", "Compliance Specialist", None, "hired"),  # Missing startDate (Amber path trigger)
+            ("201", "Elena", "Vasquez", "elena.vasquez@example.com", "Operations", "Compliance Specialist", None, "hired"),  # Missing startDate (Amber path trigger)
             ("202", "Alex", "Kowalski", "alex.k@example.com", "Engineering", "Security Analyst", "2026-08-01", "interviewing")
         ]
         cursor.executemany("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?)", candidates)
