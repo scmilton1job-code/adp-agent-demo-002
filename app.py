@@ -209,7 +209,7 @@ if "messages" not in st.session_state:
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.markdown(msg["content"], unsafe_allow_html=True)
         if msg.get("scim_payload"):
             with st.expander("📋 SCIM User Schema (RFC 7643)"):
                 st.json(msg["scim_payload"])
@@ -265,17 +265,17 @@ if user_prompt:
 
                     output = ""
                     if status_val == "complete":
-                        output += "### <span class='badge-success'>✓ PROVISIONED</span>\n"
+                        output += '<div><span class="badge-success">✓ PROVISIONED</span></div>\n\n'
                         output += f"**Decision:** {agent_res.get('validation_summary')}\n\n"
                         output += "Identity provisioned into SCIM schema for downstream enrollment."
                     elif status_val == "incomplete":
-                        output += "### <span class='badge-warning'>⚠️ ACTION BLOCKED</span>\n"
+                        output += '<div><span class="badge-warning">⚠️ ACTION BLOCKED</span></div>\n\n'
                         output += f"**Decision:** {agent_res.get('validation_summary')}\n\n"
                         output += f"**Missing:** `{agent_res.get('missing_fields')}`\n\n"
                         if agent_res.get("remediation_draft"):
                             output += f"**Draft notification:**\n```\n{agent_res['remediation_draft']}\n```"
                     else:
-                        output += f"### <span class='badge-info'>ℹ️ {status_val.upper()}</span>\n"
+                        output += f'<div><span class="badge-info">ℹ️ {status_val.upper()}</span></div>\n\n'
                         if "validation_summary" in agent_res:
                             output += f"**Summary:** {agent_res['validation_summary']}\n"
                         elif "contributing_factors" in agent_res:
