@@ -288,3 +288,60 @@ def execute_ksao_profile_write(employee_id: str, new_skills: list) -> dict:
         "profile_schema": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
         "current_skills": new_skills
     }
+
+
+def terminate_employee(employee_id: str) -> dict:
+    """
+    Marks an employee record as terminated in the System of Record.
+    Raises ValueError if the employee does not exist.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM employees WHERE id = ?", (employee_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise ValueError(f"Employee '{employee_id}' not found.")
+    cursor.execute(
+        "UPDATE employees SET status = ? WHERE id = ?",
+        ("terminated", employee_id),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "employeeId": employee_id,
+        "status": "terminated",
+        "message": "Employee record marked terminated in System of Record.",
+    }
+
+
+def update_employee_fields(employee_id: str, fields: dict) -> dict:
+    """
+    Applies arbitrary field updates to an employee record.
+    Only columns that exist on the employees table are updated.
+    Raises ValueError if the employee does not exist or no valid fields supplied.
+    """
+    UPDATABLE = {"firstName", "lastName", "email", "department", "jobTitle",
+                 "startDate", "tax_jurisdiction"}
+    valid = {k: v for k, v in fields.items() if k in UPDATABLE}
+    if not valid:
+        raise ValueError(
+            f"No updatable fields supplied. Allowed: {sorted(UPDATABLE)}"
+        )
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM employees WHERE id = ?", (employee_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise ValueError(f"Employee '{employee_id}' not found.")
+
+    set_clause = ", ".join(f"{col} = ?" for col in valid)
+    values = list(valid.values()) + [employee_id]
+    cursor.execute(f"UPDATE employees SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+    return {
+        "employeeId": employee_id,
+        "updated_fields": list(valid.keys()),
+        "message": "Employee record updated in System of Record.",
+    }

@@ -12,6 +12,8 @@ from tools import (
     execute_tax_withholding_write,
     execute_etime_coverage_write,
     execute_ksao_profile_write,
+    terminate_employee,
+    update_employee_fields,
 )
 from agent import agent
 from batch_manager import batch_engine
@@ -205,31 +207,36 @@ def invoke(request: InvokeRequest):
     # ── 4. Terminate ───────────────────────────────────────────────────────
     elif action == "terminate_employee":
         employee_id = str(request.input.get("employeeId", "456"))
-        employee = get_employee_from_adp(employee_id)
-        if not employee:
+        try:
+            result = terminate_employee(employee_id)
+            return {"status": "success", **result}
+        except ValueError as e:
             return JSONResponse(
                 status_code=404,
-                content={"status": "error", "message": f"Employee '{employee_id}' not found."},
+                content={"status": "error", "message": str(e)},
             )
-        return {
-            "status": "success",
-            "message": f"Employee {employee_id} terminated successfully. System of Record updated.",
-        }
+        except Exception as e:
+            logger.error("Terminate failed for employee %s: %s", employee_id, e)
+            raise HTTPException(status_code=500, detail=str(e))
 
     # ── 5. Update ──────────────────────────────────────────────────────────
     elif action == "update_employee":
         employee_id = str(request.input.get("employeeId", "789"))
-        employee = get_employee_from_adp(employee_id)
-        if not employee:
+        fields = request.input.get("fields", {})
+        try:
+            result = update_employee_fields(employee_id, fields)
+            return {"status": "success", **result}
+        except ValueError as e:
+            # Could be not-found (404) or no valid fields (422)
+            msg = str(e)
+            status_code = 422 if "Allowed:" in msg else 404
             return JSONResponse(
-                status_code=404,
-                content={"status": "error", "message": f"Employee '{employee_id}' not found."},
+                status_code=status_code,
+                content={"status": "error", "message": msg},
             )
-        return {
-            "status": "success",
-            "message": f"Employee {employee_id} updated successfully.",
-            "updated_fields": list(request.input.get("fields", {}).keys()),
-        }
+        except Exception as e:
+            logger.error("Update failed for employee %s: %s", employee_id, e)
+            raise HTTPException(status_code=500, detail=str(e))
 
     else:
         raise HTTPException(status_code=400, detail=f"Action '{request.action}' is not supported.")
@@ -247,7 +254,10 @@ def update_tax_withholding(payload: TaxWithholdingUpdate):
             payload.employeeId, payload.stateJurisdiction, payload.withholdingElections
         )
         return {"status": "success", "mcp_handler": "taxWithholding_write", "details": result}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        logger.error("Tax withholding write failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -259,7 +269,10 @@ def orchestrate_schedule_coverage(payload: ScheduleSwapRequest):
             payload.shiftId, payload.action, payload.eligibleWorkerIds
         )
         return {"status": "success", "mcp_handler": "cover_drop_swap_write", "details": result}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        logger.error("eTIME coverage write failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -269,7 +282,10 @@ def sync_talent_profile(payload: TalentProfileSync):
     try:
         result = execute_ksao_profile_write(payload.employeeId, payload.skillsAcquired)
         return {"status": "success", "mcp_handler": "ksao_profile_sync", "details": result}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        logger.error("KSAO profile sync failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

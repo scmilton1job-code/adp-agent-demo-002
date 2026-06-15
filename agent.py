@@ -1,14 +1,34 @@
+"""
+agent.py — Multi-Agent Reasoning Engine
+========================================
+Owns:
+  - Agent persona system prompts (PROMPTS)
+  - Dry-run rule-based fallback evaluation logic
+  - execute_reasoning() public interface consumed by main.py and batch_manager.py
+
+Does NOT own:
+  - Which LLM is called (delegated to llm_provider.get_provider())
+  - HTTP transport, retries, auth, or JSON cleaning (all in llm_provider.py)
+
+To swap the LLM backend, set the LLM_PROVIDER environment variable.
+No code changes required anywhere in this file.
+"""
+
+import datetime
+import json
+import logging
 import os
 import re
-import json
-import time
-import requests
-import logging
-import datetime
+from typing import Any
+
+from llm_provider import get_provider, LLMProvider
 
 logger = logging.getLogger("adp-agent.engine")
 
-# --- Specialized Multi-Agent System Prompts ---
+
+# ---------------------------------------------------------------------------
+# Agent persona system prompts
+# ---------------------------------------------------------------------------
 
 PROMPTS = {
     "onboarding": """
@@ -61,126 +81,89 @@ Do not return any conversational text outside of this JSON block.
 }
 
 
-# --- Resilient Gemini API Execution Client ---
+# ---------------------------------------------------------------------------
+# Agent engine
+# ---------------------------------------------------------------------------
 
-class GeminiMCPRunner:
+class MCPAgentRunner:
     """
-    Direct HTTPS REST wrapper targeting the Gemini 2.5 Flash API endpoint.
-    Maintains zero-dependency footprint and implements resilient exponential backoff retry loops.
-    """
-    def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY", "")
-        self.model_name = "gemini-2.5-flash-preview-09-2025"
-        self.endpoint_url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models"
-            f"/{self.model_name}:generateContent"
-        )
+    Coordinates agent persona selection, LLM execution, and dry-run fallback.
 
-    def execute_reasoning(self, agent_mode: str, data_context: dict, user_prompt: str) -> dict:
+    The active LLM provider is resolved once at construction time via
+    llm_provider.get_provider() — controlled entirely by environment variables.
+    """
+
+    def __init__(self, provider: LLMProvider | None = None) -> None:
+        # Allow explicit injection for testing; otherwise resolve from env.
+        self._provider: LLMProvider = provider or get_provider()
+        logger.info("MCPAgentRunner initialised with provider: %s", self._provider.name)
+
+    # ------------------------------------------------------------------
+    # Public interface (unchanged signature — main.py and batch_manager.py
+    # call this exactly as before)
+    # ------------------------------------------------------------------
+
+    def execute_reasoning(
+        self,
+        agent_mode: str,
+        data_context: dict,
+        user_prompt: str,
+    ) -> dict[str, Any]:
         """
-        Coordinates execution prompts through Gemini with rigorous exponential backoff up to 5 retries.
-        Falls back to deterministic dry-run logic when no API key is present.
+        Routes a reasoning request through the active LLM provider.
+
+        Falls back to deterministic dry-run logic when:
+          - The active provider is DryRunProvider, or
+          - The provider returns {"status": "__dry_run__"} (its sentinel), or
+          - The provider returns {"status": "error"} (any unrecoverable failure).
         """
         if agent_mode not in PROMPTS:
             logger.warning(
-                "Unknown agent_mode '%s' requested — defaulting to 'onboarding'.", agent_mode
+                "Unknown agent_mode '%s' — defaulting to 'onboarding'.", agent_mode
             )
             agent_mode = "onboarding"
 
-        if not self.api_key:
-            logger.warning(
-                "GEMINI_API_KEY is not configured in environment. Using offline dry-run logic."
-            )
-            return self._generate_dry_run_fallback(agent_mode, data_context)
-
-        system_instruction = PROMPTS[agent_mode]
-        user_query_content = (
+        system_prompt = PROMPTS[agent_mode]
+        user_content = (
             f"Data Context: {json.dumps(data_context)}\n\n"
             f"User request or command: {user_prompt}"
         )
 
-        payload = {
-            "contents": [{"parts": [{"text": user_query_content}]}],
-            "systemInstruction": {"parts": [{"text": system_instruction}]},
-            "generationConfig": {"responseMimeType": "application/json"},
+        result = self._provider.complete(system_prompt, user_content)
+
+        # Dry-run sentinel or hard error → fall back to local rule engine
+        if result.get("status") in ("__dry_run__", "error"):
+            logger.info(
+                "Provider returned status='%s' — activating dry-run fallback for mode '%s'.",
+                result.get("status"),
+                agent_mode,
+            )
+            return self._dry_run_fallback(agent_mode, data_context)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Dry-run fallback dispatcher
+    # ------------------------------------------------------------------
+
+    def _dry_run_fallback(self, agent_mode: str, data_context: dict) -> dict[str, Any]:
+        handlers = {
+            "onboarding": self._dry_run_onboarding,
+            "payroll":    self._dry_run_payroll,
+            "scheduling": self._dry_run_scheduling,
         }
-
-        url_with_key = f"{self.endpoint_url}?key={self.api_key}"
-        retry_delays = [1, 2, 4, 8, 16]
-
-        for attempt, delay in enumerate(retry_delays):
-            try:
-                response = requests.post(
-                    url_with_key,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=15,
-                )
-                if response.status_code == 200:
-                    result_json = response.json()
-                    raw_text = result_json["candidates"][0]["content"]["parts"][0]["text"]
-                    return self._clean_and_parse_json(raw_text)
-                elif response.status_code == 429:
-                    logger.warning("Rate-limited on attempt %d/%d — backing off.", attempt + 1, len(retry_delays))
-                else:
-                    logger.error(
-                        "API invocation failed with code %d: %s",
-                        response.status_code,
-                        response.text,
-                    )
-            except Exception as e:
-                logger.error("Error during API request (attempt %d): %s", attempt + 1, str(e))
-
-            if attempt < len(retry_delays) - 1:
-                time.sleep(delay)
-
-        return {
-            "status": "error",
-            "message": "The downstream Gemini engine is temporarily unavailable after 5 retries.",
-        }
+        handler = handlers.get(agent_mode)
+        if handler is None:
+            return {"status": "error", "message": f"No dry-run handler for mode '{agent_mode}'."}
+        return handler(data_context)
 
     # ------------------------------------------------------------------
-    # JSON hygiene
+    # Onboarding rule-based evaluator
     # ------------------------------------------------------------------
 
-    def _clean_and_parse_json(self, text: str) -> dict:
-        """
-        Defensively strips markdown fences before passing output to JSON decoder.
-        """
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            logger.error("Failed to decode Gemini JSON response: %s\nRaw text: %s", exc, text)
-            return {
-                "status": "error",
-                "message": "Agent returned malformed JSON. Raw output logged for inspection.",
-            }
-
-    # ------------------------------------------------------------------
-    # Deterministic dry-run fallback (no API key needed)
-    # ------------------------------------------------------------------
-
-    def _generate_dry_run_fallback(self, agent_mode: str, data_context: dict) -> dict:
-        """
-        Performs local rule-based evaluation so the demo works end-to-end
-        without a Gemini API key. Each agent mode applies its own logic.
-        """
-        if agent_mode == "onboarding":
-            return self._dry_run_onboarding(data_context)
-        elif agent_mode == "payroll":
-            return self._dry_run_payroll(data_context)
-        elif agent_mode == "scheduling":
-            return self._dry_run_scheduling(data_context)
-        # Should never reach here after the mode guard above, but be safe.
-        return {"status": "error", "message": f"No dry-run handler for mode '{agent_mode}'."}
-
-    def _dry_run_onboarding(self, ctx: dict) -> dict:
-        missing = []
-        notes = []
+    def _dry_run_onboarding(self, ctx: dict) -> dict[str, Any]:
+        missing: list[str] = []
+        notes: list[str] = []
 
         # Validate startDate
         start_date = ctx.get("startDate")
@@ -203,7 +186,10 @@ class GeminiMCPRunner:
         if not department or department.strip() == "":
             missing.append("department")
 
-        name = f"{ctx.get('firstName', '')} {ctx.get('lastName', '')}".strip() or "the candidate"
+        name = (
+            f"{ctx.get('firstName', '')} {ctx.get('lastName', '')}".strip()
+            or "the candidate"
+        )
 
         if not missing:
             return {
@@ -225,8 +211,8 @@ class GeminiMCPRunner:
             f"As part of completing your onboarding into our HR systems, we require the following "
             f"information before your record can be fully provisioned:\n\n"
             + "\n".join(f"  • {f}" for f in missing)
-            + f"\n\nPlease supply the above at your earliest convenience so we can ensure a smooth "
-            f"start date and uninterrupted payroll enrollment.\n\n"
+            + f"\n\nPlease supply the above at your earliest convenience so we can ensure "
+            f"a smooth start date and uninterrupted payroll enrollment.\n\n"
             f"Thank you,\nPeople Operations"
         )
 
@@ -240,13 +226,17 @@ class GeminiMCPRunner:
             "remediation_draft": remediation,
         }
 
-    def _dry_run_payroll(self, ctx: dict) -> dict:
+    # ------------------------------------------------------------------
+    # Payroll rule-based evaluator
+    # ------------------------------------------------------------------
+
+    def _dry_run_payroll(self, ctx: dict) -> dict[str, Any]:
         elections = ctx.get("withholding_elections", {})
         allowances = elections.get("withholding_allowances", 0)
         extra = elections.get("extra_withholding", 0)
         jurisdiction = ctx.get("tax_jurisdiction", "US-XX")
 
-        factors = []
+        factors: list[str] = []
         delta = 0.0
 
         if allowances > 2:
@@ -258,8 +248,9 @@ class GeminiMCPRunner:
         if extra > 0:
             factors.append(
                 f"Supplemental flat withholding of ${extra}/period detected — "
-                "confirm this aligns with employee's current W-4 election."
+                "confirm this aligns with the employee's current W-4 election."
             )
+            delta += extra
 
         if jurisdiction and "-" in jurisdiction:
             state = jurisdiction.split("-")[1]
@@ -292,7 +283,11 @@ class GeminiMCPRunner:
             ),
         }
 
-    def _dry_run_scheduling(self, ctx: dict) -> dict:
+    # ------------------------------------------------------------------
+    # Scheduling rule-based evaluator
+    # ------------------------------------------------------------------
+
+    def _dry_run_scheduling(self, ctx: dict) -> dict[str, Any]:
         shift_id = ctx.get("shift_id", "UNKNOWN")
         coverage_status = ctx.get("coverage_status", "unknown")
         team = ctx.get("team_name", "Unassigned Team")
@@ -311,7 +306,6 @@ class GeminiMCPRunner:
                 "eligible_candidates": [],
             }
 
-        # Simulate a pool of available workers drawn from the employees table concept
         candidate_pool = ["W-201", "W-305", "W-412"]
 
         return {
@@ -328,5 +322,8 @@ class GeminiMCPRunner:
         }
 
 
-# Singleton agent instance consumed by main.py and batch_manager.py
-agent = GeminiMCPRunner()
+# ---------------------------------------------------------------------------
+# Singleton — consumed by main.py and batch_manager.py unchanged
+# ---------------------------------------------------------------------------
+
+agent = MCPAgentRunner()
