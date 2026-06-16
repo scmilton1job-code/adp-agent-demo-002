@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 
 from tools import (
@@ -17,6 +17,13 @@ from tools import (
 )
 from agent import agent
 from batch_manager import batch_engine
+from mcp_registry import (
+    list_toolboxes,
+    list_toolbox_tools,
+    normalize_runtime_context,
+    resolve_intent,
+    resolve_tool_request,
+)
 
 # ---------------------------------------------------------------------------
 # Logger
@@ -30,41 +37,13 @@ logger = logging.getLogger("adp-agent.api")
 
 
 # ---------------------------------------------------------------------------
-# Intent registry
-# Defines deterministic keyword → action mapping so routing is auditable
-# and easy to extend without touching app.py or the route handler.
-# ---------------------------------------------------------------------------
-
-_INTENT_MAP = {
-    "hire_employee":              ["hire", "onboard", "provision", "add employee", "new hire"],
-    "diagnose_pay_variance":      ["variance", "payroll", "net pay", "withholding", "pay delta", "compensation"],
-    "orchestrate_schedule_coverage": ["schedule", "etime", "shift", "coverage", "staffing"],
-    "terminate_employee":         ["terminate", "offboard", "separation", "let go", "fire"],
-    "update_employee":            ["update", "modify", "change", "edit", "patch"],
-}
-
-
-def resolve_intent(raw_action: str) -> str:
-    """
-    Maps a free-text action string to a canonical action name using the
-    intent registry. Returns the raw value unchanged if no match is found
-    so existing exact-match callers keep working.
-    """
-    lowered = raw_action.strip().lower()
-    for canonical, keywords in _INTENT_MAP.items():
-        if any(kw in lowered for kw in keywords):
-            return canonical
-    logger.warning("resolve_intent: no match found for '%s' — returning as-is.", raw_action)
-    return lowered
-
-
-# ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
 class InvokeRequest(BaseModel):
     action: str
-    input: dict = {}
+    input: dict = Field(default_factory=dict)
+    runtime_context: dict = Field(default_factory=dict)
 
 class TaxWithholdingUpdate(BaseModel):
     employeeId: str
@@ -104,27 +83,48 @@ def capabilities():
     return {
         "agent": "adp-mcp-orchestration-hub",
         "version": "2.1",
-        "active_capabilities": [
-            {
-                "name": "hire_employee",
-                "description": "Onboarding Agent: validates candidate fields and compiles SCIM schema.",
-                "input_schema": {"candidateId": "string"},
-                "intent_keywords": _INTENT_MAP["hire_employee"],
-            },
-            {
-                "name": "diagnose_pay_variance",
-                "description": "Payroll Agent: reviews pay history and locates rate/withholding deltas.",
-                "input_schema": {"employeeId": "string"},
-                "intent_keywords": _INTENT_MAP["diagnose_pay_variance"],
-            },
-            {
-                "name": "orchestrate_schedule_coverage",
-                "description": "Scheduling Agent: scans open shifts and routes candidate notifications.",
-                "input_schema": {"shiftId": "string"},
-                "intent_keywords": _INTENT_MAP["orchestrate_schedule_coverage"],
-            },
-        ],
+        "marketplace_mode": "feature-canonical",
+        "active_capabilities": list_toolboxes(),
     }
+
+
+@app.get("/marketplace/mcp/toolboxes")
+def marketplace_toolboxes():
+    return {
+        "status": "success",
+        "toolboxes": list_toolboxes(),
+    }
+
+
+@app.get("/marketplace/mcp/toolboxes/{toolbox_key}/tools")
+def marketplace_tools_list(
+    toolbox_key: str,
+    sor: str = "RUN",
+    region: str = "US & CAN",
+    persona: str = "Integration Tester",
+    rollout_phase: str = "1.5",
+):
+    runtime_context = normalize_runtime_context(
+        {
+            "sor": sor,
+            "region": region,
+            "persona": persona,
+            "rollout_phase": rollout_phase,
+        }
+    )
+    try:
+        tools = list_toolbox_tools(toolbox_key, runtime_context)
+        return {
+            "status": "success",
+            "toolbox_key": toolbox_key,
+            "runtime_context": runtime_context,
+            "tools": tools,
+        }
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "message": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,32 @@ def capabilities():
 @app.post("/invoke")
 def invoke(request: InvokeRequest):
     action = resolve_intent(request.action)
-    logger.info("Invoke — resolved action='%s' (raw='%s') input=%s", action, request.action, request.input)
+    runtime_context = normalize_runtime_context(request.runtime_context)
+    logger.info(
+        "Invoke — resolved action='%s' (raw='%s') input=%s runtime_context=%s",
+        action,
+        request.action,
+        request.input,
+        runtime_context,
+    )
+
+    try:
+        mcp_resolution = resolve_tool_request(action, runtime_context)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "message": str(exc)},
+        )
+
+    if not mcp_resolution["can_execute"]:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "blocked",
+                "message": mcp_resolution["reason"],
+                "mcp_resolution": mcp_resolution,
+            },
+        )
 
     # ── 1. Onboarding ──────────────────────────────────────────────────────
     if action == "hire_employee":
@@ -160,6 +185,7 @@ def invoke(request: InvokeRequest):
             "status": "success" if agent_resp.get("status") == "complete" else "incomplete",
             "agent_response": agent_resp,
             "scim_schema": scim_data,
+            "mcp_resolution": mcp_resolution,
         }
 
     # ── 2. Payroll variance ────────────────────────────────────────────────
@@ -181,6 +207,7 @@ def invoke(request: InvokeRequest):
             "status": "success",
             "agent_response": agent_resp,
             "metadata_evaluated": {"employeeId": employee_id, "payroll_system": "iPay"},
+            "mcp_resolution": mcp_resolution,
         }
 
     # ── 3. Schedule coverage ───────────────────────────────────────────────
@@ -202,6 +229,7 @@ def invoke(request: InvokeRequest):
             "status": "success",
             "agent_response": agent_resp,
             "metadata_evaluated": {"shiftId": shift_id, "WFM_system": "eTIME"},
+            "mcp_resolution": mcp_resolution,
         }
 
     # ── 4. Terminate ───────────────────────────────────────────────────────
@@ -209,7 +237,7 @@ def invoke(request: InvokeRequest):
         employee_id = str(request.input.get("employeeId", "456"))
         try:
             result = terminate_employee(employee_id)
-            return {"status": "success", **result}
+            return {"status": "success", **result, "mcp_resolution": mcp_resolution}
         except ValueError as e:
             return JSONResponse(
                 status_code=404,
@@ -225,7 +253,7 @@ def invoke(request: InvokeRequest):
         fields = request.input.get("fields", {})
         try:
             result = update_employee_fields(employee_id, fields)
-            return {"status": "success", **result}
+            return {"status": "success", **result, "mcp_resolution": mcp_resolution}
         except ValueError as e:
             # Could be not-found (404) or no valid fields (422)
             msg = str(e)

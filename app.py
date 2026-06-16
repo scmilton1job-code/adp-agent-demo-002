@@ -4,6 +4,8 @@ import requests
 import streamlit as st
 import json
 
+from mcp_registry import INTENT_MAP, DEFAULT_RUNTIME_CONTEXT
+
 # ---------------------------------------------------------------------------
 # SSL helper
 # ---------------------------------------------------------------------------
@@ -29,19 +31,6 @@ CLOUD_RUN_URL = os.getenv(
     "http://localhost:8000",   # safe local default for development
 ).rstrip("/")
 
-
-# ---------------------------------------------------------------------------
-# Intent mapping mirrors main.py so the UI can build correct payloads
-# without raw string matching on the user's message.
-# ---------------------------------------------------------------------------
-
-INTENT_MAP = {
-    "hire_employee":              ["hire", "onboard", "provision", "add employee", "new hire"],
-    "diagnose_pay_variance":      ["variance", "payroll", "net pay", "withholding", "pay delta", "compensation"],
-    "orchestrate_schedule_coverage": ["schedule", "etime", "shift", "coverage", "staffing"],
-    "terminate_employee":         ["terminate", "offboard", "separation"],
-    "update_employee":            ["update", "modify", "change", "edit", "patch"],
-}
 
 DEFAULT_INPUTS = {
     "hire_employee":              lambda digits: {"candidateId": digits or "101"},
@@ -121,6 +110,38 @@ descriptions = {
 }
 st.sidebar.info(descriptions[active_agent])
 st.sidebar.markdown("---")
+
+st.sidebar.markdown("### 🧭 Marketplace Context")
+selected_sor = st.sidebar.selectbox(
+    "Authoritative SOR",
+    ["RUN", "WFN CG", "WFN NG"],
+    index=0,
+)
+selected_region = st.sidebar.selectbox(
+    "Region",
+    ["US & CAN"],
+    index=0,
+)
+selected_persona = st.sidebar.selectbox(
+    "Persona",
+    ["Integration Tester", "EE", "Manager"],
+    index=0,
+)
+selected_phase = st.sidebar.selectbox(
+    "Rollout Phase",
+    ["1", "1.5", "2"],
+    index=1,
+)
+runtime_context = {
+    **DEFAULT_RUNTIME_CONTEXT,
+    "sor": selected_sor,
+    "region": selected_region,
+    "persona": selected_persona,
+    "rollout_phase": selected_phase,
+}
+st.sidebar.caption(
+    f"Feature-canonical enforcement via `{runtime_context['sor']}` · {runtime_context['rollout_phase']}"
+)
 
 # ---------------------------------------------------------------------------
 # Batch processing — async with live progress bar
@@ -252,7 +273,7 @@ if user_prompt:
             try:
                 resp = requests.post(
                     f"{CLOUD_RUN_URL}/invoke",
-                    json={"action": action_name, "input": input_body},
+                    json={"action": action_name, "input": input_body, "runtime_context": runtime_context},
                     verify=_ssl_verify_setting(),
                     timeout=20,
                 )
@@ -261,6 +282,7 @@ if user_prompt:
                     api_data = resp.json()
                     agent_res = api_data.get("agent_response", {})
                     scim_payload = api_data.get("scim_schema")
+                    mcp_resolution = api_data.get("mcp_resolution", {})
                     status_val = agent_res.get("status") or api_data.get("status", "")
 
                     output = ""
@@ -289,9 +311,20 @@ if user_prompt:
 
                     st.markdown(output, unsafe_allow_html=True)
 
+                    if mcp_resolution:
+                        st.caption(
+                            "Resolved via "
+                            f"{mcp_resolution.get('feature_canonical', 'unknown canonical')} → "
+                            f"{mcp_resolution.get('tool_name', 'unknown tool')} → "
+                            f"{mcp_resolution.get('runtime_context', {}).get('sor', 'unknown SOR')}"
+                        )
+
                     if scim_payload:
                         with st.expander("📋 SCIM User Schema (RFC 7643)"):
                             st.json(scim_payload)
+                    if mcp_resolution:
+                        with st.expander("🧭 Marketplace MCP Resolution"):
+                            st.json(mcp_resolution)
                     with st.expander("🔍 Raw A2A JSON"):
                         st.json(api_data)
 
@@ -303,7 +336,8 @@ if user_prompt:
                         "raw_a2a_json": api_data,
                     })
                 else:
-                    err = f"Gateway returned HTTP {resp.status_code}."
+                    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                    err = body.get("message") or f"Gateway returned HTTP {resp.status_code}."
                     st.error(err)
                     st.session_state.messages.append(
                         {"role": "assistant", "content": err, "mode": active_agent}

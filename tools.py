@@ -37,11 +37,17 @@ def init_and_seed_db():
             department TEXT,
             jobTitle TEXT,
             startDate TEXT,
+            status TEXT,
             tax_jurisdiction TEXT,
             withholding_elections TEXT,
             direct_deposit_split TEXT
         )
     ''')
+
+    cursor.execute("PRAGMA table_info(employees)")
+    employee_columns = {row[1] for row in cursor.fetchall()}
+    if "status" not in employee_columns:
+        cursor.execute("ALTER TABLE employees ADD COLUMN status TEXT DEFAULT 'active'")
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS schedules (
@@ -80,10 +86,10 @@ def init_and_seed_db():
     cursor.execute("SELECT COUNT(*) FROM employees")
     if cursor.fetchone()[0] == 0:
         employees = [
-            ("789", "John", "Doe", "john.doe@example.com", "Sales", "Account Executive", "2025-01-10", "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 50}), json.dumps({"checking": "100%"})),
-            ("101", "Sarah", "Chen", "sarah.chen@example.com", "Engineering", "Senior Cloud Engineer", "2026-07-01", "US-CA", json.dumps({"withholding_allowances": 1, "extra_withholding": 0}), json.dumps({"checking": "100%"}))
+            ("789", "John", "Doe", "john.doe@example.com", "Sales", "Account Executive", "2025-01-10", "active", "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 50}), json.dumps({"checking": "100%"})),
+            ("101", "Sarah", "Chen", "sarah.chen@example.com", "Engineering", "Senior Cloud Engineer", "2026-07-01", "active", "US-CA", json.dumps({"withholding_allowances": 1, "extra_withholding": 0}), json.dumps({"checking": "100%"}))
         ]
-        cursor.executemany("INSERT INTO employees VALUES (?,?,?,?,?,?,?,?,?,?)", employees)
+        cursor.executemany("INSERT INTO employees VALUES (?,?,?,?,?,?,?,?,?,?,?)", employees)
         logger.info("Successfully seeded 'employees' table.")
 
     # Seed Schedules (eTIME mock data)
