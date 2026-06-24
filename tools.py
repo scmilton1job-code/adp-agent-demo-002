@@ -40,7 +40,8 @@ def init_and_seed_db():
             tax_jurisdiction TEXT,
             withholding_elections TEXT,
             direct_deposit_split TEXT,
-            location_id TEXT
+            location_id TEXT,
+            status TEXT DEFAULT 'active'
         )
     ''')
     
@@ -107,6 +108,9 @@ def init_and_seed_db():
     if "location_id" not in existing_cols:
         cursor.execute("ALTER TABLE employees ADD COLUMN location_id TEXT")
         logger.info("Migrated 'employees' table: added location_id column.")
+    if "status" not in existing_cols:
+        cursor.execute("ALTER TABLE employees ADD COLUMN status TEXT DEFAULT 'active'")
+        logger.info("Migrated 'employees' table: added status column.")
     
     # Seed Candidates
     cursor.execute("SELECT COUNT(*) FROM candidates")
@@ -124,10 +128,10 @@ def init_and_seed_db():
     cursor.execute("SELECT COUNT(*) FROM employees")
     if cursor.fetchone()[0] == 0:
         employees = [
-            ("789", "John", "Doe", "john.doe@example.com", "Sales", "Account Executive", "2025-01-10", "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 50}), json.dumps({"checking": "100%"}), None),
-            ("101", "Sarah", "Chen", "sarah.chen@example.com", "Engineering", "Senior Cloud Engineer", "2026-07-01", "US-CA", json.dumps({"withholding_allowances": 1, "extra_withholding": 0}), json.dumps({"checking": "100%"}), None),
+            ("789", "John", "Doe", "john.doe@example.com", "Sales", "Account Executive", "2025-01-10", "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 50}), json.dumps({"checking": "100%"}), None, "active"),
+            ("101", "Sarah", "Chen", "sarah.chen@example.com", "Engineering", "Senior Cloud Engineer", "2026-07-01", "US-CA", json.dumps({"withholding_allowances": 1, "extra_withholding": 0}), json.dumps({"checking": "100%"}), None, "active"),
         ]
-        cursor.executemany("INSERT INTO employees VALUES (?,?,?,?,?,?,?,?,?,?,?)", employees)
+        cursor.executemany("INSERT INTO employees VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", employees)
         logger.info("Successfully seeded 'employees' table.")
 
     # Seed Northfield Outdoor Co. workforce — IDs prefixed N- to avoid colliding
@@ -138,19 +142,19 @@ def init_and_seed_db():
     if cursor.fetchone()[0] == 0:
         northfield_employees = [
             ("N-1", "Sarah", "Chen", "sarah.chen@northfield.com", "Sales", "Sales Associate", "2024-01-10",
-             "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-100"),
+             "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-100", "active"),
             ("N-2", "John", "Doe", "john.doe@northfield.com", "Operations", "Store Manager", "2023-05-20",
-             "US-NY", json.dumps({"withholding_allowances": 1, "extra_withholding": 25}), json.dumps({"checking": "100%"}), "LOC-100"),
+             "US-NY", json.dumps({"withholding_allowances": 1, "extra_withholding": 25}), json.dumps({"checking": "100%"}), "LOC-100", "active"),
             ("N-3", "Emily", "Davis", "emily.davis@northfield.com", "Sales", "Sales Associate", "2024-03-15",
-             "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-101"),
+             "US-NY", json.dumps({"withholding_allowances": 2, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-101", "active"),
             ("N-4", "Michael", "Brown", "michael.brown@northfield.com", "Operations", "Inventory Lead", "2022-11-01",
-             "US-NJ", json.dumps({"withholding_allowances": 3, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-200"),
+             "US-NJ", json.dumps({"withholding_allowances": 3, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-200", "active"),
             ("N-5", "Jessica", "Lee", "jessica.lee@northfield.com", "Sales", "Cashier", "2024-06-01",
-             "US-PA", json.dumps({"withholding_allowances": 1, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-300"),
+             "US-PA", json.dumps({"withholding_allowances": 1, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-300", "active"),
             ("N-6", "David", "Wilson", "david.wilson@northfield.com", "Operations", "Warehouse Manager", "2021-08-12",
-             "US-TX", json.dumps({"withholding_allowances": 2, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-400"),
+             "US-TX", json.dumps({"withholding_allowances": 2, "extra_withholding": 0}), json.dumps({"checking": "100%"}), "LOC-400", "active"),
         ]
-        cursor.executemany("INSERT INTO employees VALUES (?,?,?,?,?,?,?,?,?,?,?)", northfield_employees)
+        cursor.executemany("INSERT INTO employees VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", northfield_employees)
         logger.info("Successfully seeded Northfield Outdoor Co. workforce rows in 'employees' table.")
 
     # Seed Schedules (eTIME mock data)
@@ -401,6 +405,63 @@ def execute_ksao_profile_write(employee_id: str, new_skills: list) -> dict:
         "sync_count": len(new_skills),
         "profile_schema": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
         "current_skills": new_skills
+    }
+
+
+def terminate_employee(employee_id: str) -> dict:
+    """
+    Marks an employee record as terminated in the System of Record.
+    Raises ValueError if the employee does not exist.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM employees WHERE id = ?", (employee_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise ValueError(f"Employee '{employee_id}' not found.")
+    cursor.execute(
+        "UPDATE employees SET status = ? WHERE id = ?",
+        ("terminated", employee_id),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "employeeId": employee_id,
+        "status": "terminated",
+        "message": "Employee record marked terminated in System of Record.",
+    }
+
+
+def update_employee_fields(employee_id: str, fields: dict) -> dict:
+    """
+    Applies arbitrary field updates to an employee record.
+    Only columns that exist on the employees table are updated.
+    Raises ValueError if the employee does not exist or no valid fields supplied.
+    """
+    UPDATABLE = {"firstName", "lastName", "email", "department", "jobTitle",
+                 "startDate", "tax_jurisdiction", "location_id"}
+    valid = {k: v for k, v in fields.items() if k in UPDATABLE}
+    if not valid:
+        raise ValueError(
+            f"No updatable fields supplied. Allowed: {sorted(UPDATABLE)}"
+        )
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM employees WHERE id = ?", (employee_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise ValueError(f"Employee '{employee_id}' not found.")
+
+    set_clause = ", ".join(f"{col} = ?" for col in valid)
+    values = list(valid.values()) + [employee_id]
+    cursor.execute(f"UPDATE employees SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+    return {
+        "employeeId": employee_id,
+        "updated_fields": list(valid.keys()),
+        "message": "Employee record updated in System of Record.",
     }
 
 

@@ -14,6 +14,10 @@ from tools import (
     execute_ksao_profile_write,
     terminate_employee,
     update_employee_fields,
+    get_low_performing_locations,
+    get_labor_vs_budget_variance,
+    get_labor_cost_by_department,
+    generate_morning_report,
 )
 from agent import agent
 from batch_manager import batch_engine
@@ -227,7 +231,6 @@ def invoke(request: InvokeRequest):
             result = update_employee_fields(employee_id, fields)
             return {"status": "success", **result}
         except ValueError as e:
-            # Could be not-found (404) or no valid fields (422)
             msg = str(e)
             status_code = 422 if "Allowed:" in msg else 404
             return JSONResponse(
@@ -362,3 +365,51 @@ def debug_scim_transform(candidate_id: str):
             content={"status": "error", "message": "Candidate profile not found."},
         )
     return {"status": "success", "scim_format": transform_to_scim_format(candidate)}
+
+
+# ---------------------------------------------------------------------------
+# Financial Insights — Workforce/ERP join model (Northfield Outdoor Co.)
+#
+# These are deterministic SQL aggregations over the locations/erp_gl_transactions
+# /erp_labor_expense_codes tables seeded in tools.py. They intentionally do NOT
+# route through agent.execute_reasoning() — there is no LLM reasoning step here,
+# just a query, so adding a persona + dry-run fallback would be indirection
+# without benefit. If a future iteration wants the agent to narrate these
+# numbers conversationally, that's a thin layer added on top of these
+# functions, not a reason to route through them now.
+# ---------------------------------------------------------------------------
+
+@app.get("/insights/low-performing")
+def low_performing(period: str = "2026-05"):
+    try:
+        return {"status": "success", "period": period, "locations": get_low_performing_locations(period)}
+    except Exception as e:
+        logger.error("Low-performing locations query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/insights/labor-variance")
+def labor_variance(period: str = "2026-05"):
+    try:
+        return {"status": "success", "period": period, "variance": get_labor_vs_budget_variance(period)}
+    except Exception as e:
+        logger.error("Labor variance query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/insights/by-department")
+def department_labor(period: str = "2026-05"):
+    try:
+        return {"status": "success", "period": period, "departments": get_labor_cost_by_department(period)}
+    except Exception as e:
+        logger.error("Labor-by-department query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/insights/morning-report")
+def morning_report(period: str = "2026-05"):
+    try:
+        return {"status": "success", "report": generate_morning_report(period)}
+    except Exception as e:
+        logger.error("Morning report generation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
