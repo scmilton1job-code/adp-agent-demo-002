@@ -88,6 +88,14 @@ st.markdown("""
         background-color: #DBEAFE; color: #1E3A8A;
         padding: 4px 12px; border-radius: 12px; font-weight: 700; font-size: .85em;
     }
+    .badge-risk {
+        background-color: #FEE2E2; color: #991B1B;
+        padding: 4px 12px; border-radius: 12px; font-weight: 700; font-size: .85em;
+    }
+    .badge-ok {
+        background-color: #D1FAE5; color: #065F46;
+        padding: 4px 12px; border-radius: 12px; font-weight: 700; font-size: .85em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -183,6 +191,33 @@ if uploaded_file is not None:
 
 
 # ---------------------------------------------------------------------------
+# Financial Insights — Workforce/ERP join model (Northfield Outdoor Co.)
+#
+# These call the GET /insights/... endpoints directly rather than going
+# through the chat intent resolver — they take no payload and aren't part
+# of the hire/payroll/schedule action set, so a dedicated panel is clearer
+# than overloading resolve_intent() with fake keyword matches.
+# ---------------------------------------------------------------------------
+
+st.sidebar.markdown("### 📊 Financial Insights Gateway")
+st.sidebar.caption("Northfield Outdoor Co. — workforce/ERP join model")
+
+insight_period = st.sidebar.selectbox(
+    "Reporting period",
+    ["2026-05", "2026-04"],
+    key="insight_period",
+)
+
+run_report = st.sidebar.button("📈 Generate Morning Report")
+
+if run_report:
+    st.session_state["show_insights"] = True
+    st.session_state["insights_period"] = insight_period
+
+st.sidebar.markdown("---")
+
+
+# ---------------------------------------------------------------------------
 # Main area
 # ---------------------------------------------------------------------------
 
@@ -192,6 +227,93 @@ st.markdown(
     "`Centralized Integration Gateway` &middot; `Multi-Agent Routing`"
 )
 st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Financial Insights panel — rendered above the chat when triggered from
+# the sidebar. Pulls from the read-only /insights/... endpoints, which are
+# deterministic SQL aggregations (no agent/LLM call involved).
+# ---------------------------------------------------------------------------
+
+if st.session_state.get("show_insights"):
+    period = st.session_state.get("insights_period", "2026-05")
+    st.markdown(f"## 📊 Daily Workforce & Financial Insights — `{period}`")
+
+    try:
+        report_resp = requests.get(
+            f"{CLOUD_RUN_URL}/insights/morning-report",
+            params={"period": period},
+            verify=_ssl_verify_setting(),
+            timeout=15,
+        )
+
+        if report_resp.status_code == 200:
+            report = report_resp.json().get("report", {})
+            top_risk = report.get("top_risk_locations", [])
+            variance = report.get("budget_variance", [])
+
+            # --- Top risk locations ---
+            st.markdown("#### 🚩 Top Risk Locations (by labor-to-revenue ratio)")
+            if top_risk:
+                cols = st.columns(len(top_risk))
+                for col, loc in zip(cols, top_risk):
+                    ratio = loc.get("labor_ratio")
+                    is_risk = ratio is not None and ratio >= 1.0
+                    badge_class = "badge-risk" if is_risk else "badge-ok"
+                    badge_label = "⚠️ OVER BUDGET" if is_risk else "✓ HEALTHY"
+                    with col:
+                        st.markdown(
+                            f'<div><span class="{badge_class}">{badge_label}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.metric(
+                            label=loc.get("location", "Unknown"),
+                            value=f"{ratio:.2f}" if ratio is not None else "N/A",
+                            help="Labor cost ÷ revenue. Above 1.0 means labor cost exceeds revenue.",
+                        )
+                        st.caption(
+                            f"Revenue: ${loc.get('revenue', 0):,.0f}  ·  "
+                            f"Labor: ${loc.get('labor', 0):,.0f}"
+                        )
+            else:
+                st.info("No location data available for this period.")
+
+            st.markdown("---")
+
+            # --- Budget variance ---
+            st.markdown("#### 💰 Labor vs. Budget Variance")
+            if variance:
+                for v in variance:
+                    pct = v.get("variance_pct")
+                    over_budget = pct is not None and pct > 0
+                    badge_class = "badge-risk" if over_budget else "badge-ok"
+                    badge_label = f"+{pct}% over budget" if over_budget else f"{pct}% under budget"
+                    st.markdown(
+                        f"**{v.get('location')}** — "
+                        f'<span class="{badge_class}">{badge_label}</span>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        f"Actual: ${v.get('actual_labor', 0):,.0f}  ·  "
+                        f"Budget: ${v.get('budget_labor', 0):,.0f}  ·  "
+                        f"Variance: ${v.get('variance', 0):,.0f}"
+                    )
+            else:
+                st.info("No budget data available for this period.")
+
+            with st.expander("🔍 Raw insights JSON"):
+                st.json(report)
+
+        else:
+            st.error(f"Insights gateway returned HTTP {report_resp.status_code}.")
+
+    except Exception as e:
+        st.error(f"Could not reach insights gateway: {e}")
+
+    if st.button("✖ Close Insights Panel"):
+        st.session_state["show_insights"] = False
+        st.rerun()
+
+    st.markdown("---")
 
 # Chat state
 if "messages" not in st.session_state:
